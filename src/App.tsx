@@ -107,6 +107,37 @@ export const App: React.FC = () => {
     return favorites.some((c) => c.url === channel.url);
   };
 
+  // Función recursiva y unificada para reproducir canales:
+  // Si está conectado a Chromecast, cambia la señal en la TV sin abrir video en el teléfono.
+  // Si no está conectado, abre el reproductor en el teléfono.
+  const handleSelectMedia = (media: Channel | VodItem) => {
+    const title = 'name' in media ? media.name : media.title;
+    const logo = 'logo' in media ? media.logo : media.poster;
+
+    if (castStatus.isConnected) {
+      castService.castMedia(media.url, title, logo);
+      setSelectedMedia(null); // No abre video en la app, queda la pantalla limpia con la barra de control
+    } else {
+      setSelectedMedia(media);
+    }
+  };
+
+  // Control Remoto: Canal Siguiente
+  const handleNextChannel = () => {
+    if (channels.length === 0) return;
+    const currentIdx = channels.findIndex((c) => c.name === castStatus.currentTitle);
+    const nextIdx = currentIdx === -1 ? 0 : (currentIdx + 1) % channels.length;
+    handleSelectMedia(channels[nextIdx]);
+  };
+
+  // Control Remoto: Canal Anterior
+  const handlePrevChannel = () => {
+    if (channels.length === 0) return;
+    const currentIdx = channels.findIndex((c) => c.name === castStatus.currentTitle);
+    const prevIdx = currentIdx === -1 ? 0 : (currentIdx - 1 + channels.length) % channels.length;
+    handleSelectMedia(channels[prevIdx]);
+  };
+
   // Filtrar canales según búsqueda
   const filteredChannels = channels.filter((ch) => {
     if (!searchQuery.trim()) return true;
@@ -156,7 +187,7 @@ export const App: React.FC = () => {
                   key={channel.id}
                   channel={channel}
                   isFavorite={isChannelFavorite(channel)}
-                  onSelect={(ch) => setSelectedMedia(ch)}
+                  onSelect={handleSelectMedia}
                   onToggleFavorite={toggleFavorite}
                 />
               ))}
@@ -169,7 +200,7 @@ export const App: React.FC = () => {
         <VodSection
           filterType="movie"
           searchQuery={searchQuery}
-          onSelectVod={(vod) => setSelectedMedia(vod)}
+          onSelectVod={handleSelectMedia}
         />
       )}
 
@@ -177,7 +208,7 @@ export const App: React.FC = () => {
         <VodSection
           filterType="series"
           searchQuery={searchQuery}
-          onSelectVod={(vod) => setSelectedMedia(vod)}
+          onSelectVod={handleSelectMedia}
         />
       )}
 
@@ -211,7 +242,7 @@ export const App: React.FC = () => {
                   key={channel.id}
                   channel={channel}
                   isFavorite={true}
-                  onSelect={(ch) => setSelectedMedia(ch)}
+                  onSelect={handleSelectMedia}
                   onToggleFavorite={toggleFavorite}
                 />
               ))}
@@ -220,8 +251,12 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Barra de control flotante de Chromecast (Estilo YouTube) */}
-      <CastFloatingBar castStatus={castStatus} />
+      {/* Barra de control flotante de Chromecast (Estilo Control Remoto YouTube) */}
+      <CastFloatingBar
+        castStatus={castStatus}
+        onPrevChannel={handlePrevChannel}
+        onNextChannel={handleNextChannel}
+      />
 
       {/* Modal de reproducción con selector de calidad y menú de zapping de canales */}
       {selectedMedia && (
@@ -232,7 +267,7 @@ export const App: React.FC = () => {
           sources={PLAYLIST_SOURCES}
           channels={channels}
           isLoadingChannels={isLoadingChannels}
-          onSelectChannel={(ch) => setSelectedMedia(ch)}
+          onSelectChannel={handleSelectMedia}
           onSelectSource={(src) => setSelectedSource(src)}
           onOpenCast={() => setIsCastModalOpen(true)}
           onClose={() => setSelectedMedia(null)}

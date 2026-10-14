@@ -357,10 +357,21 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
 }
 .cast-ctrl-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.2);
+  transform: scale(1.06);
+}
+.cast-ctrl-btn.highlight {
+  background: rgba(0, 210, 211, 0.2);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(0, 210, 211, 0.4);
+}
+.cast-ctrl-btn.highlight:hover {
+  background: var(--accent-cyan);
+  color: #0c0d14;
 }
 
 /* Modal del reproductor de video */
