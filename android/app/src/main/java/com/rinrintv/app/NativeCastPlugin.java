@@ -1,12 +1,31 @@
 package com.rinrintv.app;
 
+import android.Manifest;
+import android.content.Context;
+import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
+import android.os.Build;
+import android.util.Log;
+import android.view.ViewGroup;
+
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.fragment.app.FragmentActivity;
+import androidx.fragment.app.FragmentManager;
 import androidx.mediarouter.app.MediaRouteButton;
+import androidx.mediarouter.app.MediaRouteChooserDialogFragment;
+import androidx.mediarouter.app.MediaRouteControllerDialogFragment;
+import androidx.mediarouter.media.MediaRouteSelector;
+import androidx.mediarouter.media.MediaRouter;
+
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+
+import com.google.android.gms.cast.CastMediaControlIntent;
 import com.google.android.gms.cast.MediaInfo;
 import com.google.android.gms.cast.MediaLoadRequestData;
 import com.google.android.gms.cast.MediaMetadata;
@@ -21,20 +40,67 @@ import com.google.android.gms.common.images.WebImage;
 @CapacitorPlugin(name = "NativeCast")
 public class NativeCastPlugin extends Plugin {
 
+    private static final String TAG = "NativeCastPlugin";
     private CastContext castContext;
     private SessionManager sessionManager;
     private CastSession currentCastSession;
     private SessionManagerListener<CastSession> sessionManagerListener;
     private RemoteMediaClient.Callback remoteMediaClientCallback;
+    private WifiManager.MulticastLock multicastLock;
+    private MediaRouter mediaRouter;
+    private MediaRouter.Callback mediaRouterCallback;
+    private MediaRouteButton hiddenMediaRouteButton;
 
     @Override
     public void load() {
         super.load();
+
+        // 1. Adquirir MulticastLock para permitir el descubrimiento mDNS (Chromecast / Sony TV)
+        try {
+            WifiManager wifi = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wifi != null) {
+                multicastLock = wifi.createMulticastLock("rinrintv_cast_multicast_lock");
+                multicastLock.setReferenceCounted(true);
+                multicastLock.acquire();
+                Log.d(TAG, "MulticastLock adquirido con éxito.");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "No se pudo adquirir MulticastLock: " + e.getMessage());
+        }
+
+        // 2. Inicializar CastContext y MediaRouter en el hilo UI
         getActivity().runOnUiThread(() -> {
             try {
                 castContext = CastContext.getSharedInstance(getContext());
                 sessionManager = castContext.getSessionManager();
 
+                // Montar un MediaRouteButton invisible en la jerarquía para sincronizar el estado
+                try {
+                    ViewGroup rootView = (ViewGroup) getActivity().findViewById(android.R.id.content);
+                    if (rootView != null && hiddenMediaRouteButton == null) {
+                        hiddenMediaRouteButton = new MediaRouteButton(getActivity());
+                        hiddenMediaRouteButton.setAlpha(0f);
+                        hiddenMediaRouteButton.setClickable(false);
+                        hiddenMediaRouteButton.setFocusable(false);
+                        rootView.addView(hiddenMediaRouteButton, new ViewGroup.LayoutParams(1, 1));
+                        CastButtonFactory.setUpMediaRouteButton(getContext(), hiddenMediaRouteButton);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "No se pudo enlazar hiddenMediaRouteButton: " + e.getMessage());
+                }
+
+                // Configurar escaneo pasivo de MediaRouter para que los dispositivos aparezcan de inmediato
+                MediaRouteSelector selector = getCastSelector();
+                mediaRouter = MediaRouter.getInstance(getContext());
+                mediaRouterCallback = new MediaRouter.Callback() {
+                    @Override
+                    public void onRouteAdded(MediaRouter router, MediaRouter.RouteInfo route) {
+                        Log.d(TAG, "Ruta Cast detectada: " + route.getName());
+                    }
+                };
+                mediaRouter.addCallback(selector, mediaRouterCallback, MediaRouter.CALLBACK_FLAG_REQUEST_DISCOVERY);
+
+                // Configurar callbacks de reproducción de medios
                 remoteMediaClientCallback = new RemoteMediaClient.Callback() {
                     @Override
                     public void onStatusUpdated() {
@@ -51,12 +117,17 @@ public class NativeCastPlugin extends Plugin {
                     }
                 };
 
+                // Configurar listener de sesiones de Cast
                 sessionManagerListener = new SessionManagerListener<CastSession>() {
                     @Override
-                    public void onSessionStarting(CastSession session) {}
+                    public void onSessionStarting(CastSession session) {
+                        Log.d(TAG, "Iniciando sesión Cast...");
+                    }
 
                     @Override
                     public void onSessionStarted(CastSession session, String sessionId) {
+                        Log.d(TAG, "Sesión Cast iniciada exitosamente con: " + 
+                            (session.getCastDevice() != null ? session.getCastDevice().getFriendlyName() : "dispositivo"));
                         currentCastSession = session;
                         if (session.getRemoteMediaClient() != null) {
                             session.getRemoteMediaClient().registerCallback(remoteMediaClientCallback);
@@ -72,6 +143,7 @@ public class NativeCastPlugin extends Plugin {
 
                     @Override
                     public void onSessionStartFailed(CastSession session, int error) {
+                        Log.w(TAG, "Fallo al iniciar sesión Cast. Código de error: " + error);
                         currentCastSession = null;
                         JSObject ret = new JSObject();
                         ret.put("isConnected", false);
@@ -85,6 +157,7 @@ public class NativeCastPlugin extends Plugin {
 
                     @Override
                     public void onSessionEnded(CastSession session, int error) {
+                        Log.d(TAG, "Sesión Cast finalizada.");
                         currentCastSession = null;
                         JSObject ret = new JSObject();
                         ret.put("isConnected", false);
@@ -98,6 +171,7 @@ public class NativeCastPlugin extends Plugin {
 
                     @Override
                     public void onSessionResumed(CastSession session, boolean wasSuspended) {
+                        Log.d(TAG, "Sesión Cast reanudada.");
                         currentCastSession = session;
                         if (session.getRemoteMediaClient() != null) {
                             session.getRemoteMediaClient().registerCallback(remoteMediaClientCallback);
@@ -127,20 +201,82 @@ public class NativeCastPlugin extends Plugin {
 
                 sessionManager.addSessionManagerListener(sessionManagerListener, CastSession.class);
             } catch (Exception e) {
-                e.printStackTrace();
+                Log.e(TAG, "Error inicializando CastContext", e);
             }
         });
+    }
+
+    private MediaRouteSelector getCastSelector() {
+        if (castContext != null && castContext.getMergedSelector() != null) {
+            return castContext.getMergedSelector();
+        }
+        return new MediaRouteSelector.Builder()
+            .addControlCategory(CastMediaControlIntent.categoryForCast(CastMediaControlIntent.DEFAULT_MEDIA_RECEIVER_APPLICATION_ID))
+            .build();
+    }
+
+    private void ensurePermissions() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED) {
+                    ActivityCompat.requestPermissions(getActivity(), new String[]{Manifest.permission.NEARBY_WIFI_DEVICES}, 2001);
+                }
+            } else {
+                if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                    ActivityCompat.requestPermissions(getActivity(), new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 2002);
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error verificando permisos: " + e.getMessage());
+        }
     }
 
     @PluginMethod
     public void requestSession(PluginCall call) {
         getActivity().runOnUiThread(() -> {
             try {
-                MediaRouteButton button = new MediaRouteButton(getActivity());
-                CastButtonFactory.setUpMediaRouteButton(getContext(), button);
-                button.performClick();
-                call.resolve();
+                ensurePermissions();
+
+                if (castContext == null) {
+                    castContext = CastContext.getSharedInstance(getContext());
+                    sessionManager = castContext.getSessionManager();
+                }
+
+                MediaRouteSelector selector = getCastSelector();
+
+                // Activar escaneo activo inmediato en MediaRouter
+                if (mediaRouter != null && mediaRouterCallback != null) {
+                    mediaRouter.removeCallback(mediaRouterCallback);
+                    mediaRouter.addCallback(selector, mediaRouterCallback, MediaRouter.CALLBACK_FLAG_PERFORM_ACTIVE_SCAN);
+                }
+
+                if (getActivity() instanceof FragmentActivity) {
+                    FragmentManager fm = ((FragmentActivity) getActivity()).getSupportFragmentManager();
+                    boolean isConnected = sessionManager != null 
+                        && sessionManager.getCurrentCastSession() != null 
+                        && sessionManager.getCurrentCastSession().isConnected();
+
+                    if (isConnected) {
+                        if (fm.findFragmentByTag("androidx.mediarouter.app.MediaRouteControllerDialogFragment") == null) {
+                            MediaRouteControllerDialogFragment controllerDialog = new MediaRouteControllerDialogFragment();
+                            controllerDialog.show(fm, "androidx.mediarouter.app.MediaRouteControllerDialogFragment");
+                        }
+                    } else {
+                        if (fm.findFragmentByTag("androidx.mediarouter.app.MediaRouteChooserDialogFragment") == null) {
+                            MediaRouteChooserDialogFragment chooserDialog = new MediaRouteChooserDialogFragment();
+                            chooserDialog.setRouteSelector(selector);
+                            chooserDialog.show(fm, "androidx.mediarouter.app.MediaRouteChooserDialogFragment");
+                        }
+                    }
+                    call.resolve();
+                } else if (hiddenMediaRouteButton != null) {
+                    hiddenMediaRouteButton.showDialog();
+                    call.resolve();
+                } else {
+                    call.reject("No se encontró FragmentManager para mostrar el selector de Cast.");
+                }
             } catch (Exception e) {
+                Log.e(TAG, "Error abriendo selector de Cast", e);
                 call.reject("Error abriendo diálogo de Cast: " + e.getMessage());
             }
         });
@@ -236,5 +372,21 @@ public class NativeCastPlugin extends Plugin {
             }
         }
         call.resolve(ret);
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        super.handleOnDestroy();
+        try {
+            if (mediaRouter != null && mediaRouterCallback != null) {
+                mediaRouter.removeCallback(mediaRouterCallback);
+            }
+            if (sessionManager != null && sessionManagerListener != null) {
+                sessionManager.removeSessionManagerListener(sessionManagerListener, CastSession.class);
+            }
+            if (multicastLock != null && multicastLock.isHeld()) {
+                multicastLock.release();
+            }
+        } catch (Exception ignored) {}
     }
 }

@@ -40,6 +40,7 @@ class CastService {
   private presentationConnection: any = null;
   private activeVideoElement: HTMLVideoElement | null = null;
   private lastChannelList: { name: string; url: string; logo?: string }[] = [];
+  private pendingMedia: { url: string; title: string; logoUrl?: string; channelList?: any[] } | null = null;
 
   constructor() {
     if (Capacitor.isNativePlatform()) {
@@ -55,6 +56,7 @@ class CastService {
 
     try {
       NativeCast.addListener('castStatusChanged', (data) => {
+        const wasConnected = this.status.isConnected;
         this.status.isConnected = data.isConnected;
         this.status.deviceName = data.deviceName || (data.isConnected ? 'Smart TV' : null);
         if (typeof data.isPaused === 'boolean') {
@@ -64,6 +66,14 @@ class CastService {
           this.status.currentTitle = null;
         }
         this.notify();
+
+        if (!wasConnected && data.isConnected && this.pendingMedia) {
+          const pending = this.pendingMedia;
+          this.pendingMedia = null;
+          setTimeout(() => {
+            this.loadMedia(pending.url, pending.title, pending.logoUrl, pending.channelList);
+          }, 400);
+        }
       });
 
       NativeCast.getStatus()
@@ -146,6 +156,14 @@ class CastService {
       this.status.deviceName = device?.friendlyName || 'Sony Bravia TV';
 
       this.attachMediaSessionListener(session);
+
+      if (this.pendingMedia) {
+        const pending = this.pendingMedia;
+        this.pendingMedia = null;
+        setTimeout(() => {
+          this.loadMedia(pending.url, pending.title, pending.logoUrl, pending.channelList);
+        }, 400);
+      }
     } else {
       this.status.isConnected = false;
       this.status.deviceName = null;
@@ -298,18 +316,11 @@ class CastService {
     this.status.isPaused = false;
     this.notify();
 
-    const doLoad = () => {
-      this.loadMedia(url, title, logoUrl, channelList || this.lastChannelList);
-    };
-
     if (!this.status.isConnected) {
-      this.requestSession().then((connected) => {
-        if (connected) {
-          setTimeout(doLoad, 500);
-        }
-      });
+      this.pendingMedia = { url, title, logoUrl, channelList: channelList || this.lastChannelList };
+      this.requestSession();
     } else {
-      doLoad();
+      this.loadMedia(url, title, logoUrl, channelList || this.lastChannelList);
     }
   }
 

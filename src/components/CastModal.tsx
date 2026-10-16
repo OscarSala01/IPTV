@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Cast, Wifi, Tv, ExternalLink, Copy, Check, X, RefreshCw, Smartphone, Play } from 'lucide-react';
 import { CastStatus, castService } from '../services/castService';
 
@@ -19,6 +19,7 @@ export const CastModal: React.FC<CastModalProps> = ({
 }) => {
   const [copied, setCopied] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
+  const prevConnectedRef = useRef(castStatus.isConnected);
 
   useEffect(() => {
     if (isOpen && !castStatus.isConnected) {
@@ -26,22 +27,27 @@ export const CastModal: React.FC<CastModalProps> = ({
     }
   }, [isOpen]);
 
+  // Si se conecta con éxito mientras el modal está abierto, cargar stream y cerrar
+  useEffect(() => {
+    if (!prevConnectedRef.current && castStatus.isConnected) {
+      if (currentStreamUrl) {
+        castService.loadMedia(currentStreamUrl, currentTitle || 'Canal RinRinTV');
+      }
+      onClose();
+    }
+    prevConnectedRef.current = castStatus.isConnected;
+  }, [castStatus.isConnected, currentStreamUrl, currentTitle, onClose]);
+
   if (!isOpen) return null;
 
   const handleSearch = async () => {
     setIsSearching(true);
     try {
-      const connected = await castService.requestSession();
-      if (connected) {
-        if (currentStreamUrl) {
-          castService.loadMedia(currentStreamUrl, currentTitle || 'Canal RinRinTV');
-        }
-        onClose();
-      }
+      await castService.requestSession();
     } catch (err) {
-      console.warn(err);
+      console.warn('Error buscando dispositivos Cast:', err);
     } finally {
-      setTimeout(() => setIsSearching(false), 2000);
+      setTimeout(() => setIsSearching(false), 2500);
     }
   };
 
