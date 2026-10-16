@@ -1,5 +1,19 @@
-// Integración robusta de Google Cast Web Sender SDK con Soporte de Cola (Queueing / HDMI-CEC)
-// Permite que el control remoto físico de la TV Sony (CH+/CH-, Next, Prev, Play, Pause) controle los canales
+import { Capacitor, registerPlugin } from '@capacitor/core';
+
+interface NativeCastPluginInterface {
+  requestSession(): Promise<any>;
+  loadMedia(options: { url: string; title: string; logo?: string }): Promise<any>;
+  play(): Promise<any>;
+  pause(): Promise<any>;
+  stop(): Promise<any>;
+  getStatus(): Promise<{ isConnected: boolean; deviceName?: string; isPaused?: boolean }>;
+  addListener(
+    eventName: 'castStatusChanged',
+    listenerFunc: (status: { isConnected: boolean; deviceName?: string | null; isPaused?: boolean }) => void
+  ): Promise<any>;
+}
+
+const NativeCast = registerPlugin<NativeCastPluginInterface>('NativeCast');
 
 export interface CastStatus {
   isAvailable: boolean;
@@ -28,7 +42,45 @@ class CastService {
   private lastChannelList: { name: string; url: string; logo?: string }[] = [];
 
   constructor() {
-    this.initCastApi();
+    if (Capacitor.isNativePlatform()) {
+      this.initNativeCast();
+    } else {
+      this.initCastApi();
+    }
+  }
+
+  private initNativeCast() {
+    this.status.isAvailable = true;
+    this.notify();
+
+    try {
+      NativeCast.addListener('castStatusChanged', (data) => {
+        this.status.isConnected = data.isConnected;
+        this.status.deviceName = data.deviceName || (data.isConnected ? 'Smart TV' : null);
+        if (typeof data.isPaused === 'boolean') {
+          this.status.isPaused = data.isPaused;
+        }
+        if (!data.isConnected) {
+          this.status.currentTitle = null;
+        }
+        this.notify();
+      });
+
+      NativeCast.getStatus()
+        .then((data) => {
+          if (data && data.isConnected) {
+            this.status.isConnected = true;
+            this.status.deviceName = data.deviceName || 'Smart TV';
+            if (typeof data.isPaused === 'boolean') {
+              this.status.isPaused = data.isPaused;
+            }
+            this.notify();
+          }
+        })
+        .catch(() => {});
+    } catch (e) {
+      console.warn('NativeCast init error:', e);
+    }
   }
 
   public registerActiveVideo(video: HTMLVideoElement | null) {
@@ -154,6 +206,16 @@ class CastService {
    * Abre el selector oficial de Google Cast en Android (Sony Bravia TV / Chromecast)
    */
   public async requestSession(): Promise<boolean> {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await NativeCast.requestSession();
+        return true;
+      } catch (err) {
+        console.warn('NativeCast requestSession error:', err);
+        return false;
+      }
+    }
+
     if (!this.castContext) {
       this.initCastApi();
     }
@@ -267,6 +329,25 @@ class CastService {
 
     console.log(`📡 Enviando señal a la TV: ${title} (${url})`);
 
+    // 1. Si estamos en la app nativa (APK Android)
+    if (Capacitor.isNativePlatform()) {
+      NativeCast.loadMedia({
+        url,
+        title,
+        logo: logoUrl
+      })
+        .then(() => {
+          console.log(`✅ Canal cambiado en la TV (NativeCast): ${title}`);
+          this.status.isPaused = false;
+          this.status.currentTitle = title;
+          this.notify();
+        })
+        .catch((err) => {
+          console.error('❌ Error NativeCast.loadMedia:', err);
+        });
+      return;
+    }
+
     const session = this.currentSession || (this.castContext && this.castContext.getCurrentSession());
     const chrome = (window as any).chrome;
 
@@ -378,6 +459,12 @@ class CastService {
   }
 
   public play() {
+    if (Capacitor.isNativePlatform()) {
+      NativeCast.play();
+      this.status.isPaused = false;
+      this.notify();
+      return;
+    }
     const session = this.currentSession || (this.castContext && this.castContext.getCurrentSession());
     if (session) {
       const media = session.getMediaSession();
@@ -391,6 +478,12 @@ class CastService {
   }
 
   public pause() {
+    if (Capacitor.isNativePlatform()) {
+      NativeCast.pause();
+      this.status.isPaused = true;
+      this.notify();
+      return;
+    }
     const session = this.currentSession || (this.castContext && this.castContext.getCurrentSession());
     if (session) {
       const media = session.getMediaSession();
@@ -404,6 +497,14 @@ class CastService {
   }
 
   public stop() {
+    if (Capacitor.isNativePlatform()) {
+      NativeCast.stop();
+      this.status.isConnected = false;
+      this.status.deviceName = null;
+      this.status.currentTitle = null;
+      this.notify();
+      return;
+    }
     const session = this.currentSession || (this.castContext && this.castContext.getCurrentSession());
     if (session) {
       session.endSession(true);
