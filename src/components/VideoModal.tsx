@@ -95,6 +95,13 @@ export const VideoModal: React.FC<VideoModalProps> = ({
     };
   }, [showChannelDrawer, showQualityMenu, isCastModalOpen]);
 
+  // Al conectarse a Chromecast, cerramos el reproductor local del teléfono para transmitir solo a la TV
+  useEffect(() => {
+    if (castStatus.isConnected) {
+      onClose();
+    }
+  }, [castStatus.isConnected, onClose]);
+
   const handleScreenClick = () => {
     if (!showControls) {
       resetControlsTimer();

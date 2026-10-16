@@ -71,22 +71,28 @@ export class M3uParserService {
           currentName = line.substring(commaIdx + 1).trim();
         }
 
-        // Extraer logo: tvg-logo="..."
+        // Sanitizar y validar logo: solo admitir URLs http/https legítimas
         const logoMatch = line.match(/tvg-logo="([^"]*)"/i);
-        currentLogo = logoMatch ? logoMatch[1] : '';
+        const rawLogo = logoMatch ? logoMatch[1].trim() : '';
+        currentLogo = (rawLogo.startsWith('https://') || rawLogo.startsWith('http://')) ? rawLogo : '';
 
         // Extraer grupo: group-title="..."
         const groupMatch = line.match(/group-title="([^"]*)"/i);
-        currentGroup = groupMatch && groupMatch[1] ? groupMatch[1] : defaultCategory;
+        currentGroup = groupMatch && groupMatch[1] ? groupMatch[1].trim() : defaultCategory;
       } else if (line.length > 0 && !line.startsWith('#')) {
-        // Es una URL de transmisión
-        if (currentName && (line.startsWith('http://') || line.startsWith('https://'))) {
+        // Validar que sea una URL de stream válida y no un esquema peligroso (ej: javascript:)
+        const isSafeUrl = line.startsWith('https://') || line.startsWith('http://');
+
+        if (currentName && isSafeUrl) {
+          // Sanitizar nombre para evitar inyección de código
+          const cleanName = currentName.replace(/[<>]/g, '').trim();
+
           channels.push({
-            id: `ch_${Date.now()}_${channelIndex++}`,
-            name: currentName,
+            id: `ch_${channelIndex++}`,
+            name: cleanName,
             logo: currentLogo,
             url: line,
-            category: currentGroup,
+            category: currentGroup.replace(/[<>]/g, ''),
             country: defaultCategory
           });
         }

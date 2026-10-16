@@ -1,5 +1,5 @@
-// Integración robusta de Google Cast Web Sender SDK, Presentation API & HTML5 Remote Playback
-// Compatible al 100% con Sony Bravia (Android TV / Google TV) y Chromecasts
+// Integración robusta de Google Cast Web Sender SDK con Soporte de Cola (Queueing / HDMI-CEC)
+// Permite que el control remoto físico de la TV Sony (CH+/CH-, Next, Prev, Play, Pause) controle los canales
 
 export interface CastStatus {
   isAvailable: boolean;
@@ -25,6 +25,7 @@ class CastService {
   private currentSession: any = null;
   private presentationConnection: any = null;
   private activeVideoElement: HTMLVideoElement | null = null;
+  private lastChannelList: { name: string; url: string; logo?: string }[] = [];
 
   constructor() {
     this.initCastApi();
@@ -92,11 +93,7 @@ class CastService {
       this.status.isConnected = true;
       this.status.deviceName = device?.friendlyName || 'Sony Bravia TV';
 
-      const mediaSession = session.getMediaSession();
-      if (mediaSession && mediaSession.media && mediaSession.media.metadata) {
-        this.status.currentTitle = mediaSession.media.metadata.title || 'Canal de TV';
-        this.status.isPaused = mediaSession.playerState === 'PAUSED';
-      }
+      this.attachMediaSessionListener(session);
     } else {
       this.status.isConnected = false;
       this.status.deviceName = null;
@@ -104,6 +101,43 @@ class CastService {
     }
 
     this.notify();
+  }
+
+  /**
+   * Conecta un escucha de eventos multimedia para detectar cambios hechos con el control remoto físico de la TV
+   */
+  private attachMediaSessionListener(session: any) {
+    const mediaSession = session.getMediaSession();
+    if (mediaSession) {
+      if (mediaSession.media && mediaSession.media.metadata) {
+        this.status.currentTitle = mediaSession.media.metadata.title || 'Canal de TV';
+        this.status.isPaused = mediaSession.playerState === 'PAUSED';
+      }
+
+      if (!mediaSession._hasRinRinUpdateListener) {
+        mediaSession._hasRinRinUpdateListener = true;
+        mediaSession.addUpdateListener((isAlive: boolean) => {
+          if (isAlive && mediaSession.media && mediaSession.media.metadata) {
+            const newTitle = mediaSession.media.metadata.title;
+            const isPaused = mediaSession.playerState === 'PAUSED';
+
+            let changed = false;
+            if (newTitle && newTitle !== this.status.currentTitle) {
+              console.log(`📺 Canal actualizado en la TV Sony: ${newTitle}`);
+              this.status.currentTitle = newTitle;
+              changed = true;
+            }
+            if (isPaused !== this.status.isPaused) {
+              this.status.isPaused = isPaused;
+              changed = true;
+            }
+            if (changed) {
+              this.notify();
+            }
+          }
+        });
+      }
+    }
   }
 
   public subscribe(listener: CastListener): () => void {
@@ -120,6 +154,10 @@ class CastService {
    * Abre el selector oficial de Google Cast en Android (Sony Bravia TV / Chromecast)
    */
   public async requestSession(): Promise<boolean> {
+    if (!this.castContext) {
+      this.initCastApi();
+    }
+
     // 1. Google Cast SDK oficial (Default Media Receiver CC1AD845)
     if (this.castContext) {
       try {
@@ -129,15 +167,17 @@ class CastService {
           const device = this.currentSession.getCastDevice();
           this.status.isConnected = true;
           this.status.deviceName = device?.friendlyName || 'Sony Bravia TV';
+          this.attachMediaSessionListener(this.currentSession);
           this.notify();
           return true;
         }
       } catch (err: any) {
-        console.log('Google Cast requestSession cancelado o probando Presentation...');
+        console.log('Google Cast requestSession finalizado o cancelado:', err);
+        return false;
       }
     }
 
-    // 2. Presentation API (Protocolo nativo que usa Chrome en Android)
+    // 2. Presentation API (Protocolo nativo que usa Chrome si el SDK no cargó)
     const PresentationRequest = (window as any).PresentationRequest;
     if (PresentationRequest) {
       try {
@@ -161,7 +201,8 @@ class CastService {
           return true;
         }
       } catch (e) {
-        console.log('PresentationRequest dialog cerrado o fallback...');
+        console.log('PresentationRequest dialog cerrado o cancelado...');
+        return false;
       }
     }
 
@@ -179,14 +220,24 @@ class CastService {
   }
 
   /**
-   * Envía un stream HLS o MP4 a la TV
+   * Envía un stream HLS a la TV con soporte de cola (Queue) para navegación con el control remoto CEC
    */
-  public castMedia(url: string, title: string, logoUrl?: string) {
+  public castMedia(
+    url: string,
+    title: string,
+    logoUrl?: string,
+    channelList?: { name: string; url: string; logo?: string }[]
+  ) {
+    if (channelList && channelList.length > 0) {
+      this.lastChannelList = channelList;
+    }
+
     this.status.currentTitle = title;
+    this.status.isPaused = false;
     this.notify();
 
     const doLoad = () => {
-      this.loadMedia(url, title, logoUrl);
+      this.loadMedia(url, title, logoUrl, channelList || this.lastChannelList);
     };
 
     if (!this.status.isConnected) {
@@ -200,52 +251,76 @@ class CastService {
     }
   }
 
-  public loadMedia(url: string, title: string, logoUrl?: string) {
+  public loadMedia(
+    url: string,
+    title: string,
+    logoUrl?: string,
+    channelList?: { name: string; url: string; logo?: string }[]
+  ) {
+    if (channelList && channelList.length > 0) {
+      this.lastChannelList = channelList;
+    }
+
     this.status.currentTitle = title;
+    this.status.isPaused = false;
     this.notify();
 
     console.log(`📡 Enviando señal a la TV: ${title} (${url})`);
 
-    // 1. Si está conectado mediante Google Cast SDK oficial
     const session = this.currentSession || (this.castContext && this.castContext.getCurrentSession());
     const chrome = (window as any).chrome;
 
-    if (session && chrome && chrome.cast) {
-      try {
-        const isHls = url.includes('.m3u8') || url.includes('/hls/');
-        const contentType = isHls ? 'application/x-mpegurl' : 'video/mp4';
-
-        const mediaInfo = new chrome.cast.media.MediaInfo(url, contentType);
-        mediaInfo.streamType = chrome.cast.media.StreamType.LIVE;
-
-        const metadata = new chrome.cast.media.GenericMediaMetadata();
-        metadata.title = title;
-        metadata.subtitle = 'Transmitido desde RinRinTV';
-        if (logoUrl) {
-          metadata.images = [new chrome.cast.Image(logoUrl)];
-        }
-        mediaInfo.metadata = metadata;
-
-        const request = new chrome.cast.media.LoadRequest(mediaInfo);
-        request.autoplay = true;
-
-        session.loadMedia(request).then(
-          () => {
-            console.log('✅ Canal cargado exitosamente en Sony TV / Chromecast');
-            this.status.isPaused = false;
-            this.notify();
-          },
-          (err: any) => {
-            console.error('❌ Error loadMedia en Chromecast:', err);
-          }
-        );
-      } catch (e) {
-        console.error('Excepción al cargar media:', e);
-      }
+    if (session && chrome && chrome.cast && chrome.cast.media) {
+      this.attachMediaSessionListener(session);
+      this.loadSingleMedia(session, chrome, url, title, logoUrl);
+      return;
     }
 
-    // 2. Si está conectado mediante Presentation API (Android Chrome)
-    if (this.presentationConnection && this.presentationConnection.state === 'connected') {
+    // 2. Si está conectado mediante Presentation API (Android Chrome fallback)
+    if (this.presentationConnection) {
+      this.sendPresentationMedia(url, title, logoUrl);
+    }
+  }
+
+  private loadSingleMedia(session: any, chrome: any, url: string, title: string, logoUrl?: string) {
+    try {
+      const isHls = url.includes('.m3u8') || url.includes('/hls/');
+      const contentType = isHls ? 'application/x-mpegurl' : 'video/mp4';
+
+      const mediaInfo = new chrome.cast.media.MediaInfo(url, contentType);
+      mediaInfo.streamType = chrome.cast.media.StreamType.LIVE;
+
+      const metadata = new chrome.cast.media.GenericMediaMetadata();
+      metadata.title = title;
+      metadata.subtitle = 'RinRinTV En Vivo';
+      if (logoUrl) {
+        metadata.images = [new chrome.cast.Image(logoUrl)];
+      }
+      mediaInfo.metadata = metadata;
+
+      const request = new chrome.cast.media.LoadRequest(mediaInfo);
+      request.autoplay = true;
+
+      session.loadMedia(request).then(
+        () => {
+          console.log(`✅ Canal cambiado exitosamente en la TV: ${title}`);
+          this.status.isPaused = false;
+          this.status.currentTitle = title;
+          this.notify();
+        },
+        (err: any) => {
+          console.error('❌ Error loadMedia en Chromecast:', err);
+        }
+      );
+    } catch (e) {
+      console.error('Excepción al cargar media en Chromecast:', e);
+    }
+  }
+
+  private sendPresentationMedia(url: string, title: string, logoUrl?: string) {
+    if (!this.presentationConnection) return;
+
+    const send = () => {
       try {
         const isHls = url.includes('.m3u8') || url.includes('/hls/');
         const message = {
@@ -268,11 +343,38 @@ class CastService {
         };
 
         this.presentationConnection.send(JSON.stringify(message));
-        console.log('✅ Mensaje de reproducción enviado a PresentationConnection');
+        console.log(`✅ Canal enviado vía PresentationConnection: ${title}`);
+        this.status.isPaused = false;
+        this.status.currentTitle = title;
+        this.notify();
       } catch (e) {
         console.warn('Error enviando a PresentationConnection:', e);
       }
+    };
+
+    if (this.presentationConnection.state === 'connected') {
+      send();
+    } else {
+      this.presentationConnection.onconnect = () => {
+        send();
+      };
     }
+  }
+
+  public nextChannel() {
+    if (!this.lastChannelList || this.lastChannelList.length === 0) return;
+    const currentIdx = this.lastChannelList.findIndex((ch) => ch.name === this.status.currentTitle);
+    const nextIdx = currentIdx === -1 ? 0 : (currentIdx + 1) % this.lastChannelList.length;
+    const nextCh = this.lastChannelList[nextIdx];
+    this.loadMedia(nextCh.url, nextCh.name, nextCh.logo);
+  }
+
+  public prevChannel() {
+    if (!this.lastChannelList || this.lastChannelList.length === 0) return;
+    const currentIdx = this.lastChannelList.findIndex((ch) => ch.name === this.status.currentTitle);
+    const prevIdx = currentIdx === -1 ? 0 : (currentIdx - 1 + this.lastChannelList.length) % this.lastChannelList.length;
+    const prevCh = this.lastChannelList[prevIdx];
+    this.loadMedia(prevCh.url, prevCh.name, prevCh.logo);
   }
 
   public play() {

@@ -4,6 +4,7 @@ import { Channel, VodItem, ActiveTab } from './types';
 import { PLAYLIST_SOURCES, PlaylistSource, FEATURED_CHANNELS } from './data/sources';
 import { M3uParserService } from './services/m3uParser';
 import { castService, CastStatus } from './services/castService';
+import { iptvApiService } from './services/iptvApiService';
 import { Navbar } from './components/Navbar';
 import { CategoryChips } from './components/CategoryChips';
 import { ChannelCard } from './components/ChannelCard';
@@ -11,9 +12,14 @@ import { VideoModal } from './components/VideoModal';
 import { CastFloatingBar } from './components/CastFloatingBar';
 import { VodSection } from './components/VodSection';
 import { CastModal } from './components/CastModal';
+import { SourcesModal } from './components/SourcesModal';
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>('live');
+  const [sources, setSources] = useState<PlaylistSource[]>(PLAYLIST_SOURCES);
+  const [allCountries, setAllCountries] = useState<PlaylistSource[]>([]);
+  const [allCategories, setAllCategories] = useState<PlaylistSource[]>([]);
+  const [isSourcesModalOpen, setIsSourcesModalOpen] = useState<boolean>(false);
   const [selectedSource, setSelectedSource] = useState<PlaylistSource>(PLAYLIST_SOURCES[0]);
   const [channels, setChannels] = useState<Channel[]>(FEATURED_CHANNELS);
   const [isLoadingChannels, setIsLoadingChannels] = useState<boolean>(false);
@@ -28,6 +34,17 @@ export const App: React.FC = () => {
     currentTitle: null,
     isPaused: false
   });
+
+  // 1. Cargar fuentes dinámicas desde la API oficial de iptv-org
+  useEffect(() => {
+    iptvApiService.getSources().then((result) => {
+      if (result.featuredSources.length > 0) {
+        setSources(result.featuredSources);
+      }
+      setAllCountries(result.allCountries);
+      setAllCategories(result.allCategories);
+    });
+  }, []);
 
   // 1. Escuchar estado de Google Cast
   useEffect(() => {
@@ -115,7 +132,7 @@ export const App: React.FC = () => {
     const logo = 'logo' in media ? media.logo : media.poster;
 
     if (castStatus.isConnected) {
-      castService.castMedia(media.url, title, logo);
+      castService.castMedia(media.url, title, logo, channels);
       setSelectedMedia(null); // No abre video en la app, queda la pantalla limpia con la barra de control
     } else {
       setSelectedMedia(media);
@@ -138,6 +155,18 @@ export const App: React.FC = () => {
     handleSelectMedia(channels[prevIdx]);
   };
 
+  // Cambiar lista M3U seleccionada (desde los chips o desde el modal explorador de API)
+  const handleSelectSource = (src: PlaylistSource) => {
+    setSelectedSource(src);
+    // Si la fuente no está en la barra de chips, agregarla al principio
+    setSources((prev) => {
+      if (!prev.some((s) => s.id === src.id)) {
+        return [src, ...prev];
+      }
+      return prev;
+    });
+  };
+
   // Filtrar canales según búsqueda
   const filteredChannels = channels.filter((ch) => {
     if (!searchQuery.trim()) return true;
@@ -158,10 +187,12 @@ export const App: React.FC = () => {
       {/* Contenido según la pestaña activa */}
       {activeTab === 'live' && (
         <>
-          {/* Selector horizontal de países y categorías */}
+          {/* Selector horizontal de países y categorías con explorador de API */}
           <CategoryChips
+            sources={sources}
             selectedSourceId={selectedSource.id}
-            onSelectSource={setSelectedSource}
+            onSelectSource={handleSelectSource}
+            onOpenExplorer={() => setIsSourcesModalOpen(true)}
           />
 
           {/* Estado de carga */}
@@ -264,11 +295,11 @@ export const App: React.FC = () => {
           media={selectedMedia}
           castStatus={castStatus}
           currentSource={selectedSource}
-          sources={PLAYLIST_SOURCES}
+          sources={sources}
           channels={channels}
           isLoadingChannels={isLoadingChannels}
           onSelectChannel={handleSelectMedia}
-          onSelectSource={(src) => setSelectedSource(src)}
+          onSelectSource={handleSelectSource}
           onOpenCast={() => setIsCastModalOpen(true)}
           onClose={() => setSelectedMedia(null)}
         />
@@ -287,6 +318,16 @@ export const App: React.FC = () => {
             : undefined
         }
         onClose={() => setIsCastModalOpen(false)}
+      />
+
+      {/* Modal explorador completo del catálogo oficial de iptv-org API */}
+      <SourcesModal
+        isOpen={isSourcesModalOpen}
+        selectedSourceId={selectedSource.id}
+        allCountries={allCountries}
+        allCategories={allCategories}
+        onSelectSource={handleSelectSource}
+        onClose={() => setIsSourcesModalOpen(false)}
       />
 
       {/* Navegación inferior fija estilo aplicación móvil */}

@@ -32,8 +32,11 @@ export const CastModal: React.FC<CastModalProps> = ({
     setIsSearching(true);
     try {
       const connected = await castService.requestSession();
-      if (connected && currentStreamUrl) {
-        castService.castMedia(currentStreamUrl, currentTitle || 'Canal RinRinTV');
+      if (connected) {
+        if (currentStreamUrl) {
+          castService.loadMedia(currentStreamUrl, currentTitle || 'Canal RinRinTV');
+        }
+        onClose();
       }
     } catch (err) {
       console.warn(err);
